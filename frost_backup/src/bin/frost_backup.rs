@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             // Generate shares with randomness
-            let (shares, shared_key) = ShareBackup::generate_shares(
+            let (shares, shared_key) = Backup::generate_shares(
                 secret_scalar,
                 threshold,
                 number_of_shares,
@@ -205,9 +205,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 None => {
                     // Output all shares to stdout with formatting
-                    for (i, share) in shares.iter().enumerate() {
+                    for share in shares.iter() {
+                        let index_u32: u32 = share.index().try_into().unwrap();
                         eprintln!("════════════════════════════════════════════════");
-                        eprintln!("SHARE #{} - STORE THIS SEPARATELY:", i + 1);
+                        eprintln!("SHARE #{} - STORE THIS SEPARATELY:", index_u32);
                         eprintln!("════════════════════════════════════════════════");
                         println!("{}", share);
                         eprintln!();
@@ -254,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
 
-                        match ShareBackup::from_str(line) {
+                        match Backup::from_str(line) {
                             Ok(share) => {
                                 let index_u32: u32 = share.index().try_into().unwrap();
                                 eprintln!("📥 Loaded share #{} from stdin", index_u32);
@@ -271,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Read from file
                     let content = fs::read_to_string(&file)?;
 
-                    match ShareBackup::from_str(content.trim()) {
+                    match Backup::from_str(content.trim()) {
                         Ok(share) => {
                             let index_u32: u32 = share.index().try_into().unwrap();
                             eprintln!("📁 Loaded share #{} from {}", index_u32, file);

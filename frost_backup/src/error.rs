@@ -12,7 +12,8 @@ pub enum ShareBackupError {
         /// The invalid word that was provided
         word: String,
     },
-    /// The share index cannot be zero
+    /// The share index cannot be zero: `#0` is the secret itself, decode it as a
+    /// [`Backup`](crate::Backup)
     InvalidShareIndex,
     /// The encoded scalar must be less than the secp256k1 group order
     InvalidScalar,

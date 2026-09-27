@@ -1,6 +1,6 @@
 mod common;
 
-use frost_backup::{recovery, ShareBackup};
+use frost_backup::{recovery, Backup, SecretBackup};
 use rand::{rngs::StdRng, SeedableRng};
 use schnorr_fun::frost::{ShareImage, SharedKey};
 use secp256kfun::prelude::*;
@@ -18,7 +18,7 @@ fn test_recover_secret() {
 
     // 🎲 deterministic for testing since some checksums only work probabilistically
     let mut rng = StdRng::seed_from_u64(42);
-    let (shares, _) = ShareBackup::generate_shares(secret, 2, 3, TEST_FINGERPRINT, &mut rng);
+    let (shares, _) = Backup::generate_shares(secret, 2, 3, TEST_FINGERPRINT, &mut rng);
 
     // Test recovery with exact threshold
     let recovered =
@@ -58,11 +58,10 @@ fn test_find_valid_subset() {
 
     // Generate shares (threshold=2, n=4)
     let mut rng = rand::thread_rng();
-    let (shares, shared_key) =
-        ShareBackup::generate_shares(secret, 2, 4, TEST_FINGERPRINT, &mut rng);
+    let (shares, shared_key) = Backup::generate_shares(secret, 2, 4, TEST_FINGERPRINT, &mut rng);
 
     // Get share images
-    let images: Vec<ShareImage> = shares.iter().map(|s| s.share_image()).collect();
+    let images: Vec<ShareImage> = shares.iter().map(|s| s.share_image().unwrap()).collect();
 
     // Test with all shares
     let result = recovery::find_valid_subset(&images, TEST_FINGERPRINT, None);
@@ -108,20 +107,18 @@ fn test_find_valid_subset_with_conflicting_indices() {
 
     // Generate first set of shares (threshold=3, n=5)
     let mut rng = rand::thread_rng();
-    let (shares1, _shared_key1) =
-        ShareBackup::generate_shares(secret, 3, 5, TEST_FINGERPRINT, &mut rng);
+    let (shares1, _shared_key1) = Backup::generate_shares(secret, 3, 5, TEST_FINGERPRINT, &mut rng);
 
     // Generate second set of shares from the SAME secret (but different polynomial)
-    let (shares2, _shared_key2) =
-        ShareBackup::generate_shares(secret, 3, 5, TEST_FINGERPRINT, &mut rng);
+    let (shares2, _shared_key2) = Backup::generate_shares(secret, 3, 5, TEST_FINGERPRINT, &mut rng);
 
     // Create share images from the first sharing
-    let mut images: Vec<ShareImage> = shares1.iter().map(|s| s.share_image()).collect();
+    let mut images: Vec<ShareImage> = shares1.iter().map(|s| s.share_image().unwrap()).collect();
 
     // Add a share from the second sharing at index 2 (same as shares1[1])
     // This creates a conflict: two different shares both claiming to be at index 2
     // Even though both are valid shares of the same secret, they're from different polynomials
-    images.push(shares2[1].share_image());
+    images.push(shares2[1].share_image().unwrap());
 
     // Test discovery - should find valid subset from one of the sharings
     let result = recovery::find_valid_subset(&images, TEST_FINGERPRINT, None);
@@ -141,11 +138,11 @@ fn test_find_valid_subset_with_conflicting_indices() {
     // Count how many shares came from each sharing
     let from_shares1 = found_shares
         .iter()
-        .filter(|img| shares1.iter().any(|s| s.share_image() == **img))
+        .filter(|img| shares1.iter().any(|s| s.share_image().unwrap() == **img))
         .count();
     let from_shares2 = found_shares
         .iter()
-        .filter(|img| shares2.iter().any(|s| s.share_image() == **img))
+        .filter(|img| shares2.iter().any(|s| s.share_image().unwrap() == **img))
         .count();
 
     // All shares should come from one sharing or the other, not mixed
@@ -170,15 +167,15 @@ fn test_find_valid_subset_mixed_different_secrets() {
     let secret2 = s!(123);
 
     let mut rng = rand::thread_rng();
-    let (shares1, _) = ShareBackup::generate_shares(secret1, 2, 3, TEST_FINGERPRINT, &mut rng);
-    let (shares2, _) = ShareBackup::generate_shares(secret2, 2, 3, TEST_FINGERPRINT, &mut rng);
+    let (shares1, _) = Backup::generate_shares(secret1, 2, 3, TEST_FINGERPRINT, &mut rng);
+    let (shares2, _) = Backup::generate_shares(secret2, 2, 3, TEST_FINGERPRINT, &mut rng);
 
     // Mix shares from both sharings
     let mixed_images = vec![
-        shares1[0].share_image(),
-        shares1[1].share_image(),
-        shares2[0].share_image(),
-        shares2[1].share_image(),
+        shares1[0].share_image().unwrap(),
+        shares1[1].share_image().unwrap(),
+        shares2[0].share_image().unwrap(),
+        shares2[1].share_image().unwrap(),
     ];
 
     // Should find a valid subset (from one of the sharings)
@@ -206,8 +203,8 @@ fn test_recover_secret_fuzzy() {
     let secret2 = s!(9999);
 
     let mut rng = rand::thread_rng();
-    let (shares1, _) = ShareBackup::generate_shares(secret1, 2, 3, TEST_FINGERPRINT, &mut rng);
-    let (shares2, _) = ShareBackup::generate_shares(secret2, 2, 3, TEST_FINGERPRINT, &mut rng);
+    let (shares1, _) = Backup::generate_shares(secret1, 2, 3, TEST_FINGERPRINT, &mut rng);
+    let (shares2, _) = Backup::generate_shares(secret2, 2, 3, TEST_FINGERPRINT, &mut rng);
 
     // Mix shares from both sharings
     let mut mixed_shares = vec![
@@ -238,7 +235,7 @@ fn test_recover_secret_fuzzy() {
     let share_images: Vec<_> = recovered
         .compatible_shares
         .iter()
-        .map(|s| s.share_image())
+        .map(|s| s.share_image().unwrap())
         .collect();
     let reconstructed_key = SharedKey::from_share_images(share_images);
     assert_eq!(
@@ -253,7 +250,7 @@ fn test_recover_secret_fuzzy_no_valid_shares() {
 
     let secret = s!(42);
     let mut rng = rand::thread_rng();
-    let (shares, _) = ShareBackup::generate_shares(secret, 3, 5, TEST_FINGERPRINT, &mut rng);
+    let (shares, _) = Backup::generate_shares(secret, 3, 5, TEST_FINGERPRINT, &mut rng);
 
     // Only provide 2 shares when threshold is 3
     let insufficient_shares = vec![shares[0].clone(), shares[1].clone()];
@@ -263,24 +260,120 @@ fn test_recover_secret_fuzzy_no_valid_shares() {
 }
 
 #[test]
-fn test_find_valid_subset_threshold_one() {
-    // Test that 1-of-1 shares work correctly when threshold is known
+fn test_recover_threshold_one() {
+    // Threshold-1 shares are emitted as #0 secret backups and recover on their
+    // own, whether or not the threshold is known.
     let secret = s!(42);
     let mut rng = rand::thread_rng();
-    let (shares, shared_key) =
-        ShareBackup::generate_shares(secret, 1, 3, TEST_FINGERPRINT, &mut rng);
+    let (shares, shared_key) = Backup::generate_shares(secret, 1, 3, TEST_FINGERPRINT, &mut rng);
 
-    let share_images: Vec<ShareImage> = shares.iter().map(|s| s.share_image()).collect();
+    assert!(shares.iter().all(|s| s.is_secret()));
+    assert!(shares.iter().all(|s| s.share_image().is_none()));
 
-    let result = recovery::find_valid_subset(&share_images, TEST_FINGERPRINT, Some(1));
-    assert!(
-        result.is_some(),
-        "Should be able to recover with 1-of-1 share when threshold is known"
-    );
+    for known_threshold in [Some(1), None] {
+        let recovered =
+            recovery::recover_secret_fuzzy(&shares[0..1], TEST_FINGERPRINT, known_threshold)
+                .expect("a lone #0 backup should recover");
+        assert_eq!(recovered.secret.public(), secret.public());
+        assert_eq!(recovered.shared_key.public_key(), shared_key.public_key());
+        assert_eq!(recovered.compatible_shares.len(), 1);
+    }
 
-    let (found_shares, found_key) = result.unwrap();
-    assert_eq!(found_shares.len(), 3);
-    assert_eq!(found_key, shared_key);
+    // All three carry the same secret, so both strict and fuzzy recovery
+    // accept the whole set.
+    let recovered = recovery::recover_secret(&shares, TEST_FINGERPRINT).unwrap();
+    assert_eq!(recovered.secret.public(), secret.public());
+    assert_eq!(recovered.compatible_shares.len(), 3);
+
+    let recovered = recovery::recover_secret_fuzzy(&shares, TEST_FINGERPRINT, None).unwrap();
+    assert_eq!(recovered.compatible_shares.len(), 3);
+}
+
+#[test]
+fn test_recover_lone_share_of_threshold_one_key() {
+    // Threshold-1 backups issued before #0 existed carry a non-zero index
+    // (the #1 1-of-1 test vector). A single such share recovers whether the
+    // threshold is unknown or known to be 1. With a second card present and
+    // the threshold unknown, the lone-share path is not tried.
+    use crate::common::{TEST_SHARES_1_OF_1, TEST_SHARES_2_OF_3};
+    use core::str::FromStr;
+
+    let share: Backup = TEST_SHARES_1_OF_1[0].parse().unwrap();
+    assert!(matches!(share, Backup::Share(_)));
+    let expected = Scalar::<Secret, Zero>::from_str(
+        "0101010101010101010101010101010101010101010101010101010101010101",
+    )
+    .unwrap();
+
+    for known_threshold in [None, Some(1)] {
+        let recovered = recovery::recover_secret_fuzzy(
+            core::slice::from_ref(&share),
+            frost_backup::FINGERPRINT,
+            known_threshold,
+        )
+        .expect("a lone share of a threshold-1 key should recover");
+        assert_eq!(recovered.secret, expected);
+        assert_eq!(recovered.compatible_shares, vec![share.clone()]);
+    }
+
+    let other: Backup = TEST_SHARES_2_OF_3[0].parse().unwrap();
+    assert!(recovery::recover_secret_fuzzy(
+        &[share.clone(), other],
+        frost_backup::FINGERPRINT,
+        None
+    )
+    .is_none());
+}
+
+#[test]
+fn test_recover_threshold_one_key_with_mixed_zero_and_nonzero_indices() {
+    // A threshold-1 key backed up as #0 on one device and #1 on another
+    // (e.g. before and after a firmware update) carries the same scalar on
+    // both cards. Fuzzy recovery accepts either card alone and reports both
+    // as compatible.
+    use crate::common::{TEST_SECRET_BACKUP, TEST_SHARES_1_OF_1};
+
+    let secret_backup: SecretBackup = match TEST_SECRET_BACKUP.parse().unwrap() {
+        Backup::Secret(secret_backup) => secret_backup,
+        Backup::Share(_) => panic!("#0 should be a secret backup"),
+    };
+    let share: Backup = TEST_SHARES_1_OF_1[0].parse().unwrap();
+    let mixed = vec![Backup::Secret(secret_backup.clone()), share.clone()];
+
+    for known_threshold in [None, Some(1)] {
+        let recovered =
+            recovery::recover_secret_fuzzy(&mixed, frost_backup::FINGERPRINT, known_threshold)
+                .expect("should recover from the #0 card");
+        assert_eq!(
+            recovered.secret,
+            secret_backup.clone().extract_secret().unwrap()
+        );
+        assert_eq!(recovered.compatible_shares.len(), 2);
+    }
+}
+
+#[test]
+fn test_secret_backup_not_mixed_with_shares() {
+    let secret = s!(42);
+    let mut rng = rand::thread_rng();
+    let (shares, _) = Backup::generate_shares(secret, 2, 3, TEST_FINGERPRINT, &mut rng);
+    let secret_backup = SecretBackup::new(secret.mark_zero());
+
+    let mut mixed = shares[0..2].to_vec();
+    mixed.push(Backup::Secret(secret_backup));
+
+    assert!(matches!(
+        recovery::recover_secret(&mixed, TEST_FINGERPRINT),
+        Err(recovery::RecoveryError::SecretMixedWithShares)
+    ));
+
+    // Fuzzy recovery uses the #0 first: it carries the secret outright. The
+    // 2-of-3 shares belong to a different polynomial, so only the #0 is
+    // reported as compatible.
+    let recovered = recovery::recover_secret_fuzzy(&mixed, TEST_FINGERPRINT, None).unwrap();
+    assert_eq!(recovered.secret.public(), secret.public());
+    assert_eq!(recovered.compatible_shares.len(), 1);
+    assert!(recovered.compatible_shares[0].is_secret());
 }
 
 #[test]
@@ -293,13 +386,16 @@ fn test_find_valid_subset_threshold_validation() {
     use crate::common::{TEST_SHARES_1_OF_1, TEST_SHARES_2_OF_3, TEST_SHARES_3_OF_5};
 
     // Parse all 3 test shares from 2-of-3 wallet
-    let shares_2_of_3: Vec<ShareBackup> = TEST_SHARES_2_OF_3
+    let shares_2_of_3: Vec<Backup> = TEST_SHARES_2_OF_3
         .iter()
         .map(|s| s.parse().expect("Should parse test share"))
         .collect();
 
     // Extract share images
-    let share_images_2_of_3: Vec<_> = shares_2_of_3.iter().map(|s| s.share_image()).collect();
+    let share_images_2_of_3: Vec<_> = shares_2_of_3
+        .iter()
+        .map(|s| s.share_image().unwrap())
+        .collect();
 
     // Try to find valid subset with known_threshold=3
     // These shares are from a threshold-2 wallet, so this should return None
@@ -320,7 +416,7 @@ fn test_find_valid_subset_threshold_validation() {
     );
 
     // Now test with threshold-3 shares
-    let shares_3_of_5: Vec<ShareBackup> = TEST_SHARES_3_OF_5
+    let shares_3_of_5: Vec<Backup> = TEST_SHARES_3_OF_5
         .iter()
         .map(|s| s.parse().expect("Should parse test share"))
         .collect();
@@ -328,7 +424,7 @@ fn test_find_valid_subset_threshold_validation() {
     // Test with only 2 shares from threshold-3 wallet - should fail
     let share_images_insufficient: Vec<_> = shares_3_of_5[0..2]
         .iter()
-        .map(|s| s.share_image())
+        .map(|s| s.share_image().unwrap())
         .collect();
     let result = recovery::find_valid_subset(
         &share_images_insufficient,
@@ -343,7 +439,7 @@ fn test_find_valid_subset_threshold_validation() {
     // Test with exactly 3 shares from threshold-3 wallet - should succeed
     let share_images_exact: Vec<_> = shares_3_of_5[0..3]
         .iter()
-        .map(|s| s.share_image())
+        .map(|s| s.share_image().unwrap())
         .collect();
     let result =
         recovery::find_valid_subset(&share_images_exact, frost_backup::FINGERPRINT, Some(3));
@@ -353,7 +449,10 @@ fn test_find_valid_subset_threshold_validation() {
     );
 
     // Test with all 5 shares from threshold-3 wallet - should succeed
-    let share_images_all: Vec<_> = shares_3_of_5.iter().map(|s| s.share_image()).collect();
+    let share_images_all: Vec<_> = shares_3_of_5
+        .iter()
+        .map(|s| s.share_image().unwrap())
+        .collect();
     let result = recovery::find_valid_subset(&share_images_all, frost_backup::FINGERPRINT, Some(3));
     assert!(
         result.is_some(),
@@ -361,11 +460,11 @@ fn test_find_valid_subset_threshold_validation() {
     );
 
     // Test adding threshold-1 share to the mix - should still succeed (finds threshold-3 subset)
-    let share_1_of_1: ShareBackup = TEST_SHARES_1_OF_1[0]
+    let share_1_of_1: Backup = TEST_SHARES_1_OF_1[0]
         .parse()
         .expect("Should parse test share");
     let mut share_images_mixed = share_images_all.clone();
-    share_images_mixed.push(share_1_of_1.share_image());
+    share_images_mixed.push(share_1_of_1.share_image().unwrap());
 
     let result =
         recovery::find_valid_subset(&share_images_mixed, frost_backup::FINGERPRINT, Some(3));

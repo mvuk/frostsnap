@@ -1,4 +1,4 @@
-use crate::ShareBackup;
+use crate::{share_backup::secret_shared_key, Backup, SecretBackup, ShareBackup};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use schnorr_fun::{
@@ -15,6 +15,10 @@ pub enum RecoveryError {
     PolynomialChecksumFailed,
     /// Failed to extract secret from a share
     SecretExtractionFailed,
+    /// A `#0` secret backup was provided alongside shares (`#i`, `i > 0`)
+    SecretMixedWithShares,
+    /// Several `#0` backups were provided but they encode different secrets
+    SecretsDiffer,
 }
 
 impl core::fmt::Display for RecoveryError {
@@ -26,6 +30,12 @@ impl core::fmt::Display for RecoveryError {
             }
             RecoveryError::SecretExtractionFailed => {
                 write!(f, "Failed to extract secret from share")
+            }
+            RecoveryError::SecretMixedWithShares => {
+                write!(f, "A #0 backup must not be combined with shares")
+            }
+            RecoveryError::SecretsDiffer => {
+                write!(f, "The #0 backups encode different secrets")
             }
         }
     }
@@ -39,8 +49,8 @@ impl std::error::Error for RecoveryError {}
 pub struct RecoveredSecret {
     /// The recovered secret scalar
     pub secret: Scalar<Secret, Zero>,
-    /// The shares that were compatible with the recovered shared_key
-    pub compatible_shares: Vec<ShareBackup>,
+    /// The backups that were compatible with the recovered shared_key
+    pub compatible_shares: Vec<Backup>,
     /// The shared key reconstructed from the shares
     pub shared_key: SharedKey<Normal, Zero>,
 }
@@ -50,16 +60,27 @@ pub struct RecoveredSecret {
 /// The shares must have been generated with the same fingerprint. Note that all
 /// shares must be compatible with each other for this to succeed (or you put in
 /// a NONE fingerprint).
+///
+/// `#0` backups carry the secret itself: they need no interpolation, must all
+/// agree, and must not be combined with shares.
 pub fn recover_secret(
-    shares: &[ShareBackup],
+    backups: &[Backup],
     fingerprint: Fingerprint,
 ) -> Result<RecoveredSecret, RecoveryError> {
-    if shares.is_empty() {
+    if backups.is_empty() {
         return Err(RecoveryError::NoSharesProvided);
     }
 
+    let mut shares = Vec::with_capacity(backups.len());
+    for backup in backups {
+        match backup {
+            Backup::Share(share) => shares.push(share.clone()),
+            Backup::Secret(_) => return recover_from_secrets(backups),
+        }
+    }
+
     // Reconstruct the SharedKey from share images
-    let share_images: Vec<_> = shares.iter().map(|backup| backup.share_image()).collect();
+    let share_images: Vec<_> = shares.iter().map(|share| share.share_image()).collect();
     let shared_key = SharedKey::from_share_images(share_images);
 
     // Verify the fingerprint matches
@@ -74,7 +95,6 @@ pub fn recover_secret(
     let mut secret_shares = Vec::with_capacity(shares.len());
     for share in shares {
         let secret_share = share
-            .clone()
             .extract_secret(&shared_key)
             .map_err(|_| RecoveryError::SecretExtractionFailed)?;
         secret_shares.push(secret_share);
@@ -85,8 +105,36 @@ pub fn recover_secret(
 
     Ok(RecoveredSecret {
         secret: reconstructed,
-        compatible_shares: shares.to_vec(),
+        compatible_shares: backups.to_vec(),
         shared_key,
+    })
+}
+
+/// Recovers from `#0` backups only: every backup must be a secret backup and
+/// they must all encode the same secret.
+fn recover_from_secrets(backups: &[Backup]) -> Result<RecoveredSecret, RecoveryError> {
+    let mut secret = None;
+    for backup in backups {
+        let secret_backup = match backup {
+            Backup::Secret(secret_backup) => secret_backup,
+            Backup::Share(_) => return Err(RecoveryError::SecretMixedWithShares),
+        };
+        let this = secret_backup
+            .clone()
+            .extract_secret()
+            .map_err(|_| RecoveryError::SecretExtractionFailed)?;
+        match secret {
+            None => secret = Some(this),
+            Some(prev) if prev == this => {}
+            Some(_) => return Err(RecoveryError::SecretsDiffer),
+        }
+    }
+    let secret = secret.expect("backups is non-empty");
+
+    Ok(RecoveredSecret {
+        secret,
+        compatible_shares: backups.to_vec(),
+        shared_key: secret_shared_key(secret),
     })
 }
 
@@ -96,8 +144,18 @@ pub fn recover_secret(
 /// a SharedKey matching the given fingerprint. It's useful when you have a collection of shares
 /// that may include duplicates, shares from different DKG sessions, or corrupted shares.
 ///
+/// A `#0` backup carries the secret and declares itself, so any valid `#0` is
+/// used first and the subset search only runs when there is none.
+///
+/// Threshold-1 keys made before `#0` existed were backed up as `#1` shares.
+/// When the threshold is unknown and exactly one share was given, it is tried
+/// as such a key: its polynomial checksum is verified against its own degree-0
+/// commitment. That checksum is only 8 bits, so a share of a larger key passes
+/// by chance one time in 256. Trying it only for a single card keeps that to
+/// one attempt and keeps it out of a multi-card entry.
+///
 /// # Arguments
-/// * `shares` - A slice of ShareBackup instances to search through
+/// * `backups` - A slice of backups to search through
 /// * `fingerprint` - The fingerprint that was used when generating the shares
 ///
 /// # Returns
@@ -106,18 +164,63 @@ pub fn recover_secret(
 ///
 /// # Example
 /// ```no_run
-/// # use frost_backup::{ShareBackup, recovery::recover_secret_fuzzy, Fingerprint};
-/// # let mixed_shares: Vec<ShareBackup> = vec![];
+/// # use frost_backup::{Backup, recovery::recover_secret_fuzzy, Fingerprint};
+/// # let mixed_shares: Vec<Backup> = vec![];
 /// if let Some(recovered) = recover_secret_fuzzy(&mixed_shares, Fingerprint::default(), None) {
 ///     println!("Recovered secret using {} shares", recovered.compatible_shares.len());
 /// }
 /// ```
 pub fn recover_secret_fuzzy(
-    shares: &[ShareBackup],
+    backups: &[Backup],
     fingerprint: Fingerprint,
     known_threshold: Option<usize>,
 ) -> Option<RecoveredSecret> {
-    // Get share images from all shares
+    for backup in backups {
+        if let Backup::Secret(candidate) = backup {
+            if let Some(recovered) = recover_from_secret(candidate, backups) {
+                return Some(recovered);
+            }
+        }
+    }
+
+    if let Some(recovered) = recover_from_subset(backups, fingerprint, known_threshold) {
+        return Some(recovered);
+    }
+
+    match (backups, known_threshold) {
+        ([Backup::Share(share)], None) => recover_from_lone_share(share),
+        _ => None,
+    }
+}
+
+/// Tries a single `share` as a threshold-1 key: its polynomial checksum must
+/// verify against the degree-0 commitment `[share·G]`, in which case the share
+/// is the secret.
+fn recover_from_lone_share(share: &ShareBackup) -> Option<RecoveredSecret> {
+    let shared_key = SharedKey::from_poly(vec![share.share_image().image]);
+    let secret = share.clone().extract_secret(&shared_key).ok()?.share;
+
+    Some(RecoveredSecret {
+        secret,
+        compatible_shares: vec![Backup::Share(share.clone())],
+        shared_key,
+    })
+}
+
+/// The multi-share search: `#0` backups are skipped since they have no image
+/// and are never reported as compatible with a reconstructed key.
+fn recover_from_subset(
+    backups: &[Backup],
+    fingerprint: Fingerprint,
+    known_threshold: Option<usize>,
+) -> Option<RecoveredSecret> {
+    let shares: Vec<&ShareBackup> = backups
+        .iter()
+        .filter_map(|backup| match backup {
+            Backup::Share(share) => Some(share),
+            Backup::Secret(_) => None,
+        })
+        .collect();
     let share_images: Vec<ShareImage> = shares.iter().map(|s| s.share_image()).collect();
 
     // Try to find a valid subset of shares
@@ -128,8 +231,8 @@ pub fn recover_secret_fuzzy(
     let mut compatible_shares = Vec::new();
     for image in &compatible_images {
         // Find the first share that has this image (guaranteed present — the images came from the shares)
-        let share = shares.iter().find(|s| &s.share_image() == image)?;
-        compatible_shares.push(share.clone());
+        let share = shares.iter().find(|s| s.share_image() == *image)?;
+        compatible_shares.push((*share).clone());
     }
 
     // Extract secret shares
@@ -142,8 +245,35 @@ pub fn recover_secret_fuzzy(
     // Reconstruct the secret
     let reconstructed = SecretShare::recover_secret(&secret_shares);
 
+    let compatible_shares: Vec<Backup> = compatible_shares.into_iter().map(Backup::Share).collect();
+
     Some(RecoveredSecret {
         secret: reconstructed,
+        compatible_shares,
+        shared_key,
+    })
+}
+
+/// Tries to recover from a `#0` `candidate` alone, verified by its polynomial
+/// checksum against its own degree-0 commitment. The other `backups` that carry
+/// the same secret are reported as compatible.
+fn recover_from_secret(candidate: &SecretBackup, backups: &[Backup]) -> Option<RecoveredSecret> {
+    let secret = candidate.clone().extract_secret().ok()?;
+    let shared_key = secret_shared_key(secret);
+
+    let compatible_shares = backups
+        .iter()
+        .filter(|backup| match backup {
+            Backup::Secret(secret_backup) => {
+                secret_backup.clone().extract_secret().ok() == Some(secret)
+            }
+            Backup::Share(share) => share.clone().extract_secret(&shared_key).is_ok(),
+        })
+        .cloned()
+        .collect();
+
+    Some(RecoveredSecret {
+        secret,
         compatible_shares,
         shared_key,
     })
@@ -156,7 +286,9 @@ pub fn recover_secret_fuzzy(
 /// alternatives when that index is included.
 ///
 /// Note this finds shares that are compatible with each other -- it doesn't
-/// find shares that on their own were single share wallets.
+/// find shares that on their own were single share wallets unless the
+/// threshold is known to be `1`. [`recover_secret_fuzzy`] handles `#0`
+/// backups, which have no image.
 ///
 /// # Arguments
 /// * `images` - A slice of ShareImages to search through

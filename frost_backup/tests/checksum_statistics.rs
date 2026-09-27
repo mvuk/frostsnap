@@ -28,7 +28,7 @@ fn test_checksum_false_positive_rate() {
         max_bits_total: 14,
         tag: "test",
     };
-    let (shares, _) = ShareBackup::generate_shares(secret, 2, 3, fingerprint, &mut rng);
+    let (shares, _) = Backup::generate_shares(secret, 2, 3, fingerprint, &mut rng);
     let share = &shares[0];
 
     let mut false_positives = 0;

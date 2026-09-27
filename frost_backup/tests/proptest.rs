@@ -33,7 +33,7 @@ proptest! {
             max_bits_total: 14,
             tag: "test",
         };
-        let (shares, _poly_commitment) = ShareBackup::generate_shares(
+        let (shares, _poly_commitment) = Backup::generate_shares(
             secret,
             threshold,
             n_parties,
@@ -44,9 +44,10 @@ proptest! {
         // Verify we got the right number of shares
         prop_assert_eq!(shares.len(), n_parties);
 
-        // Verify share indices are sequential from 1
+        // Verify share indices are sequential from 1 (threshold 1 emits #0 secret backups)
         for (i, share) in shares.iter().enumerate() {
-            prop_assert_eq!(TryInto::<u32>::try_into(share.index()).unwrap(), (i + 1) as u32);
+            let expected = if threshold == 1 { 0 } else { (i + 1) as u32 };
+            prop_assert_eq!(TryInto::<u32>::try_into(share.index()).unwrap(), expected);
         }
 
         // Test encoding and decoding of each share
@@ -56,12 +57,12 @@ proptest! {
 
             // Test roundtrip through words
             let index_u32: u32 = share.index().try_into().unwrap();
-            let decoded = ShareBackup::from_words(index_u32, words)
+            let decoded = Backup::from_words(index_u32, words)
                 .expect("Should decode valid share");
 
             // Test Display/FromStr roundtrip
             let formatted = share.to_string();
-            let parsed: ShareBackup = formatted.parse()
+            let parsed: Backup = formatted.parse()
                 .expect("Should parse formatted share");
             let parsed_idx: u32 = parsed.index().try_into().unwrap();
             let share_idx: u32 = share.index().try_into().unwrap();
@@ -84,7 +85,7 @@ proptest! {
         for _ in 0..3.min(n_parties) { // Test up to 3 random combinations
             signer_mask.shuffle(&mut rng);
 
-            let selected_shares: Vec<ShareBackup> = signer_mask
+            let selected_shares: Vec<Backup> = signer_mask
                 .iter()
                 .zip(shares.iter())
                 .filter(|(is_selected, _)| **is_selected)
@@ -128,7 +129,7 @@ proptest! {
             ))
     ) {
         // Parse all 5 shares
-        let all_valid_shares: Vec<ShareBackup> = TEST_SHARES_3_OF_5
+        let all_valid_shares: Vec<Backup> = TEST_SHARES_3_OF_5
             .iter()
             .map(|s| s.parse().expect("Valid share string"))
             .collect();
@@ -137,12 +138,12 @@ proptest! {
         let mut rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
 
         // Get the selected shares
-        let valid_shares: Vec<ShareBackup> = all_valid_shares.choose_multiple(&mut rng, 3).cloned().collect();
+        let valid_shares: Vec<Backup> = all_valid_shares.choose_multiple(&mut rng, 3).cloned().collect();
 
         // Get share images from valid shares
         let valid_images: Vec<ShareImage> = valid_shares
             .iter()
-            .map(|s| s.share_image())
+            .map(|s| s.share_image().unwrap())
             .collect();
 
         // Generate bogus share images
