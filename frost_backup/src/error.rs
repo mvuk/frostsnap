@@ -14,6 +14,8 @@ pub enum ShareBackupError {
     },
     /// The share index cannot be zero
     InvalidShareIndex,
+    /// The encoded scalar must be less than the secp256k1 group order
+    InvalidScalar,
     /// The share index could not be parsed as a number
     ShareIndexParseError,
     /// The words checksum verification failed
@@ -38,6 +40,9 @@ impl fmt::Display for ShareBackupError {
             }
             ShareBackupError::InvalidShareIndex => {
                 write!(f, "Share index cannot be zero")
+            }
+            ShareBackupError::InvalidScalar => {
+                write!(f, "Scalar is not less than the secp256k1 group order")
             }
             ShareBackupError::ShareIndexParseError => {
                 write!(f, "Invalid share index format")

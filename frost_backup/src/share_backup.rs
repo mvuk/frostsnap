@@ -113,7 +113,8 @@ impl ShareBackup {
             }
         }
 
-        let scalar = Scalar::from_bytes_mod_order(scalar_bytes);
+        let scalar = Scalar::<Secret, Zero>::from_bytes(scalar_bytes)
+            .ok_or(ShareBackupError::InvalidScalar)?;
 
         // Verify words checksum before creating the share
         let expected_words_checksum = Self::compute_words_checksum(index, scalar, poly_checksum);

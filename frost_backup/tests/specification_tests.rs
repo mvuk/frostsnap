@@ -227,3 +227,11 @@ fn test_specification_checksum_validation() {
     let invalid = INVALID_SHARE_CHECKSUM.parse::<ShareBackup>();
     assert!(invalid.is_err(), "Invalid checksum should fail");
 }
+
+/// The encoded scalar must be less than the group order; it is rejected, not reduced
+#[test]
+fn test_specification_scalar_below_group_order() {
+    // All-ones scalar (every word is ZOO, index 2047) is >= n
+    let result = ShareBackup::from_words(1, ["ZOO"; 25]);
+    assert!(matches!(result, Err(ShareBackupError::InvalidScalar)));
+}
