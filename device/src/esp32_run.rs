@@ -26,7 +26,7 @@ use frostsnap_core::{Gist, Kind};
 use frostsnap_embedded::NonceAbSlot;
 use rand_core::RngCore;
 
-use crate::ds::HardwareDs;
+use crate::ds::{HardwareDs, SignRequest};
 use crate::efuse::EfuseHmacKeys;
 use crate::frosty_ui::FrostyUi;
 use crate::ota::OtaPartitions;
@@ -556,19 +556,13 @@ impl<'a> DeviceLoop<'a> {
                     .set_workflow(ui::Workflow::prompt(ui::Prompt::EraseDevice)),
                 CoordinatorSendBody::_LegacyChallenge(_) => {}
                 CoordinatorSendBody::RequestGenuineAttestation => {
-                    if let (Some(hw_rsa), Some(cert)) =
+                    if let (Some(hw_rsa), Some(_)) =
                         (self.hardware_rsa.as_mut(), self.certificate.as_ref())
                     {
                         let message = frostsnap_comms::genuine_certificate::attestation_message(
                             self.device_id,
                         );
-                        let ds_signature = hw_rsa.sign(&message, self.sha256);
-                        self.upstream_connection.send_to_coordinator([
-                            DeviceSendBody::GenuineAttestation {
-                                certificate: Box::new(cert.clone()),
-                                ds_signature: Box::new(ds_signature),
-                            },
-                        ]);
+                        hw_rsa.push(SignRequest::GenuineAttestation, &message, self.sha256);
                     }
                 }
                 CoordinatorSendBody::GenuineIdentityChallenge(challenge) => {
@@ -775,6 +769,23 @@ impl<'a> DeviceLoop<'a> {
                 }
                 UiEvent::EraseDataConfirm => {
                     self.erase_state = Some(erase::Erase::new(&self.full_nvs));
+                }
+            }
+        }
+
+        if let Some((request, ds_signature)) =
+            self.hardware_rsa.as_mut().and_then(|hw_rsa| hw_rsa.poll())
+        {
+            match request {
+                SignRequest::GenuineAttestation => {
+                    if let Some(cert) = self.certificate.as_ref() {
+                        self.upstream_connection.send_to_coordinator([
+                            DeviceSendBody::GenuineAttestation {
+                                certificate: Box::new(cert.clone()),
+                                ds_signature: Box::new(ds_signature),
+                            },
+                        ]);
+                    }
                 }
             }
         }
