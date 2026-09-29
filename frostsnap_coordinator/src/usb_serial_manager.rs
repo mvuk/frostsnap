@@ -3,7 +3,6 @@ const USB_VID: u16 = 12346;
 const USB_PID: u16 = 4097;
 
 use crate::firmware::{FirmwareVersion, ValidatedFirmwareBin};
-use crate::frostsnap_persist::Attestation;
 use crate::genuine_check::{GenuineCheck, GenuineResponse, GenuineStatus};
 use crate::PortOpenError;
 use crate::{FramedSerialPort, Serial};
@@ -427,10 +426,10 @@ impl UsbSerialManager {
                                     ds_signature,
                                 } => self.recv_genuine(
                                     message.from,
-                                    GenuineResponse::Attestation(Box::new(Attestation {
-                                        certificate: *certificate,
+                                    GenuineResponse::Attestation {
+                                        certificate,
                                         ds_signature,
-                                    })),
+                                    },
                                 ),
                                 DeviceSendBody::GenuineIdentityProof { signature } => self
                                     .recv_genuine(
@@ -1076,7 +1075,7 @@ mod test {
                 self.received.push(body.clone());
                 let is_genuine_request = matches!(
                     body,
-                    CoordinatorSendBody::RequestGenuineAttestation
+                    CoordinatorSendBody::RequestGenuineAttestation(_)
                         | CoordinatorSendBody::GenuineIdentityChallenge(_)
                 );
                 if is_genuine_request && self.answers_genuine_check {
@@ -1084,12 +1083,13 @@ mod test {
                         .device
                         .answer(&CoordinatorSendMessage::to(self.device.id, body));
                     self.send(match answer {
-                        GenuineResponse::Attestation(attestation) => {
-                            DeviceSendBody::GenuineAttestation {
-                                certificate: Box::new(attestation.certificate),
-                                ds_signature: attestation.ds_signature,
-                            }
-                        }
+                        GenuineResponse::Attestation {
+                            certificate,
+                            ds_signature,
+                        } => DeviceSendBody::GenuineAttestation {
+                            certificate,
+                            ds_signature,
+                        },
                         GenuineResponse::IdentityProof(signature) => {
                             DeviceSendBody::GenuineIdentityProof { signature }
                         }
@@ -1139,7 +1139,7 @@ mod test {
         assert!(device
             .received
             .iter()
-            .any(|body| matches!(body, CoordinatorSendBody::RequestGenuineAttestation)));
+            .any(|body| matches!(body, CoordinatorSendBody::RequestGenuineAttestation(_))));
 
         usb_sender.send(CoordinatorSendMessage::to(
             device.device.id,
@@ -1191,7 +1191,7 @@ mod test {
             .filter(|body| {
                 matches!(
                     body,
-                    CoordinatorSendBody::RequestGenuineAttestation
+                    CoordinatorSendBody::RequestGenuineAttestation(_)
                         | CoordinatorSendBody::GenuineIdentityChallenge(_)
                 )
             })

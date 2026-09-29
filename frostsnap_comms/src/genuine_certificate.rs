@@ -176,14 +176,19 @@ pub fn verify_certificate(
 pub const GENUINE_IDENTITY_MESSAGE_TAG: &str = "frostsnap-genuine-identity";
 
 /// Domain separation from anything else the DS key might ever sign.
-pub const GENUINE_ATTESTATION_MESSAGE_TAG: &[u8; 27] = b"frostsnap-genuine-attest-v1";
+pub const GENUINE_ATTESTATION_MESSAGE_TAG: &[u8; 27] = b"frostsnap-genuine-attest-v2";
 
-/// What the DS key signs to vouch for `device_id`. There is no challenge in it so the coordinator
-/// can keep the signature and re-check it on every launch.
-pub fn attestation_message(device_id: frostsnap_core::DeviceId) -> [u8; 60] {
-    let mut message = [0u8; 60];
+/// What the DS key signs to vouch for `device_id` to one coordinator. The coordinator's challenge
+/// makes the signature useless to any other coordinator; that one keeps it with the challenge and
+/// re-checks it on every launch.
+pub fn attestation_message(
+    challenge: crate::GenuineChallenge,
+    device_id: frostsnap_core::DeviceId,
+) -> [u8; 92] {
+    let mut message = [0u8; 92];
     message[..27].copy_from_slice(GENUINE_ATTESTATION_MESSAGE_TAG);
-    message[27..].copy_from_slice(device_id.as_bytes());
+    message[27..59].copy_from_slice(&challenge.0);
+    message[59..].copy_from_slice(device_id.as_bytes());
     message
 }
 
@@ -232,6 +237,7 @@ impl core::error::Error for GenuineError {}
 pub fn verify_attestation(
     certificate: &Certificate,
     factory_key: Point<EvenY>,
+    challenge: crate::GenuineChallenge,
     device_id: frostsnap_core::DeviceId,
     ds_signature: &[u8; 384],
 ) -> Result<CertificateBody, GenuineError> {
@@ -242,7 +248,7 @@ pub fn verify_attestation(
     let ds_public_key = rsa::RsaPublicKey::from_pkcs1_der(body.ds_public_key())
         .map_err(|_| GenuineError::MalformedDsKey)?;
     let padding = rsa::Pkcs1v15Sign::new::<sha2::Sha256>();
-    let digest: [u8; 32] = sha2::Sha256::digest(attestation_message(device_id)).into();
+    let digest: [u8; 32] = sha2::Sha256::digest(attestation_message(challenge, device_id)).into();
     ds_public_key
         .verify(padding, &digest, ds_signature.as_ref())
         .map_err(|_| GenuineError::AttestationSignatureInvalid)?;
@@ -333,10 +339,12 @@ mod test {
 
     fn ds_sign_attestation(
         ds_private: &RsaPrivateKey,
+        challenge: crate::GenuineChallenge,
         device_id: frostsnap_core::DeviceId,
     ) -> [u8; 384] {
         use sha2::Digest;
-        let digest: [u8; 32] = sha2::Sha256::digest(attestation_message(device_id)).into();
+        let digest: [u8; 32] =
+            sha2::Sha256::digest(attestation_message(challenge, device_id)).into();
         ds_private
             .sign(rsa::Pkcs1v15Sign::new::<sha2::Sha256>(), &digest)
             .unwrap()
@@ -345,7 +353,7 @@ mod test {
     }
 
     #[test]
-    pub fn attestation_is_bound_to_the_device_id() {
+    pub fn attestation_is_bound_to_the_device_id_and_challenge() {
         let mut test_rng = ChaCha20Rng::from_seed([7u8; 32]);
         let factory_keypair = KeyPair::new_xonly(Scalar::random(&mut test_rng));
         let ds_private =
@@ -363,11 +371,13 @@ mod test {
             frostsnap_core::DeviceId::new(KeyPair::new(Scalar::random(&mut test_rng)).public_key());
         let other_id =
             frostsnap_core::DeviceId::new(KeyPair::new(Scalar::random(&mut test_rng)).public_key());
-        let ds_signature = ds_sign_attestation(&ds_private, device_id);
+        let challenge = crate::GenuineChallenge([3u8; 32]);
+        let ds_signature = ds_sign_attestation(&ds_private, challenge, device_id);
 
         let body = verify_attestation(
             &certificate,
             factory_keypair.public_key(),
+            challenge,
             device_id,
             &ds_signature,
         )
@@ -378,7 +388,19 @@ mod test {
             verify_attestation(
                 &certificate,
                 factory_keypair.public_key(),
+                challenge,
                 other_id,
+                &ds_signature
+            ),
+            Err(GenuineError::AttestationSignatureInvalid),
+        );
+
+        assert_eq!(
+            verify_attestation(
+                &certificate,
+                factory_keypair.public_key(),
+                crate::GenuineChallenge([4u8; 32]),
+                device_id,
                 &ds_signature
             ),
             Err(GenuineError::AttestationSignatureInvalid),
@@ -389,6 +411,7 @@ mod test {
             verify_attestation(
                 &certificate,
                 other_factory.public_key(),
+                challenge,
                 device_id,
                 &ds_signature
             ),

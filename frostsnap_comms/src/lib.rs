@@ -230,7 +230,7 @@ pub enum CoordinatorSendBody {
     /// Answered by firmware up to v0.4.0 with an RSA signature over the bare challenge, which a
     /// relay can forward. Never sent, and ignored by current firmware.
     _LegacyChallenge(Box<GenuineChallenge>),
-    RequestGenuineAttestation,
+    RequestGenuineAttestation(Box<GenuineChallenge>),
     GenuineIdentityChallenge(Box<GenuineChallenge>),
 }
 

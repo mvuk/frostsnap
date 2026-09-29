@@ -4,7 +4,9 @@
 
 use crate::firmware::FirmwareVersion;
 use crate::frostsnap_persist::{Attestation, GenuineCerts};
-use frostsnap_comms::genuine_certificate::{verify_attestation, verify_identity, CertificateBody};
+use frostsnap_comms::genuine_certificate::{
+    verify_attestation, verify_identity, Certificate, CertificateBody,
+};
 use frostsnap_comms::{CoordinatorSendBody, CoordinatorSendMessage, GenuineChallenge};
 use frostsnap_core::schnorr_fun::fun::{marker::EvenY, Point};
 use frostsnap_core::schnorr_fun::Signature;
@@ -29,13 +31,16 @@ pub enum GenuineStatus {
 
 #[derive(Debug, Clone)]
 pub enum GenuineResponse {
-    Attestation(Box<Attestation>),
+    Attestation {
+        certificate: Box<Certificate>,
+        ds_signature: Box<[u8; 384]>,
+    },
     IdentityProof(Signature),
 }
 
 #[derive(Clone, Copy)]
 enum Request {
-    Attestation,
+    Attestation(GenuineChallenge),
     Identity(GenuineChallenge),
 }
 
@@ -93,7 +98,7 @@ impl GenuineCheck {
             let request = if self.certs.lock().unwrap().get(id).is_some() {
                 Request::Identity(GenuineChallenge::random(&mut rand::thread_rng()))
             } else {
-                Request::Attestation
+                Request::Attestation(GenuineChallenge::random(&mut rand::thread_rng()))
             };
             session.outstanding = Some(request);
             Some(request)
@@ -119,15 +124,27 @@ impl GenuineCheck {
         let session = self.sessions.get_mut(&from)?;
         let outstanding = session.outstanding.take();
         match (outstanding, response) {
-            (Some(Request::Attestation), GenuineResponse::Attestation(attestation)) => {
+            (
+                Some(Request::Attestation(challenge)),
+                GenuineResponse::Attestation {
+                    certificate,
+                    ds_signature,
+                },
+            ) => {
                 match verify_attestation(
-                    &attestation.certificate,
+                    &certificate,
                     self.factory_key,
+                    challenge,
                     from,
-                    &attestation.ds_signature,
+                    &ds_signature,
                 ) {
                     Ok(body) => {
-                        self.certs.lock().unwrap().insert(from, *attestation, body);
+                        let attestation = Attestation {
+                            certificate: *certificate,
+                            ds_signature,
+                            challenge,
+                        };
+                        self.certs.lock().unwrap().insert(from, attestation, body);
                         let challenge = GenuineChallenge::random(&mut rand::thread_rng());
                         session.outstanding = Some(Request::Identity(challenge));
                         self.push_status(from);
@@ -189,7 +206,9 @@ impl GenuineCheck {
 
 fn request_message(id: DeviceId, request: Request) -> CoordinatorSendMessage {
     let body = match request {
-        Request::Attestation => CoordinatorSendBody::RequestGenuineAttestation,
+        Request::Attestation(challenge) => {
+            CoordinatorSendBody::RequestGenuineAttestation(Box::new(challenge))
+        }
         Request::Identity(challenge) => {
             CoordinatorSendBody::GenuineIdentityChallenge(Box::new(challenge))
         }
@@ -248,7 +267,8 @@ pub(crate) mod test {
             }
         }
 
-        fn attestation_for(&self, id: DeviceId) -> Attestation {
+        /// This device's DS key vouching for `id` under `challenge`.
+        fn attestation_for(&self, challenge: GenuineChallenge, id: DeviceId) -> GenuineResponse {
             let certificate = sign_certificate(
                 schnorr_fun::new_with_deterministic_nonces::<Sha256>(),
                 DS_KEY.to_public_key().to_pkcs1_der().unwrap().to_vec(),
@@ -258,22 +278,22 @@ pub(crate) mod test {
                 1971,
                 *FACTORY,
             );
-            let digest: [u8; 32] = Sha256::digest(attestation_message(id)).into();
+            let digest: [u8; 32] = Sha256::digest(attestation_message(challenge, id)).into();
             let ds_signature = DS_KEY
                 .sign(Pkcs1v15Sign::new::<Sha256>(), &digest)
                 .unwrap()
                 .try_into()
                 .unwrap();
-            Attestation {
-                certificate,
+            GenuineResponse::Attestation {
+                certificate: Box::new(certificate),
                 ds_signature: Box::new(ds_signature),
             }
         }
 
         pub(crate) fn answer(&self, request: &CoordinatorSendMessage) -> GenuineResponse {
             match &request.message_body {
-                CoordinatorSendBody::RequestGenuineAttestation => {
-                    GenuineResponse::Attestation(Box::new(self.attestation_for(self.id)))
+                CoordinatorSendBody::RequestGenuineAttestation(challenge) => {
+                    self.attestation_for(**challenge, self.id)
                 }
                 CoordinatorSendBody::GenuineIdentityChallenge(challenge) => {
                     GenuineResponse::IdentityProof(sign_identity_challenge(
@@ -284,6 +304,13 @@ pub(crate) mod test {
                 }
                 other => panic!("not a genuine check request: {other:?}"),
             }
+        }
+    }
+
+    fn attestation_challenge(request: &CoordinatorSendMessage) -> GenuineChallenge {
+        match &request.message_body {
+            CoordinatorSendBody::RequestGenuineAttestation(challenge) => **challenge,
+            other => panic!("not an attestation request: {other:?}"),
         }
     }
 
@@ -369,7 +396,8 @@ pub(crate) mod test {
             certs.persist_update(&mut conn, update)?;
         }
         conn.execute(
-            "INSERT INTO fs_genuine_certs (id, certificate, ds_signature) VALUES ('not an id', x'00', x'00')",
+            "INSERT INTO fs_genuine_attestations (id, certificate, ds_signature, challenge) \
+             VALUES ('not an id', x'00', x'00', x'00')",
             [],
         )?;
 
@@ -387,7 +415,7 @@ pub(crate) mod test {
         let attest = check.connected(device.id, "a", supported()).unwrap();
         assert!(matches!(
             attest.message_body,
-            CoordinatorSendBody::RequestGenuineAttestation
+            CoordinatorSendBody::RequestGenuineAttestation(_)
         ));
         assert_eq!(
             check.status(device.id),
@@ -449,13 +477,9 @@ pub(crate) mod test {
         let attest = check.connected(device.id, "a", supported()).unwrap();
         check.take_changes();
 
-        let for_another_device = device.attestation_for(TestDevice::new(99).id);
-        assert!(check
-            .recv(
-                device.id,
-                GenuineResponse::Attestation(Box::new(for_another_device))
-            )
-            .is_none());
+        let for_another_device =
+            device.attestation_for(attestation_challenge(&attest), TestDevice::new(99).id);
+        assert!(check.recv(device.id, for_another_device).is_none());
         assert_eq!(
             check.status(device.id),
             Some(GenuineStatus::Unattested {
@@ -475,13 +499,11 @@ pub(crate) mod test {
         let device = TestDevice::new(23);
         let impostor = TestDevice::new(24);
         let mut check = new_check();
-        check.connected(impostor.id, "a", supported()).unwrap();
+        let attest = check.connected(impostor.id, "a", supported()).unwrap();
 
-        let genuine_devices_attestation = device.attestation_for(device.id);
-        check.recv(
-            impostor.id,
-            GenuineResponse::Attestation(Box::new(genuine_devices_attestation)),
-        );
+        let genuine_devices_attestation =
+            device.attestation_for(attestation_challenge(&attest), device.id);
+        check.recv(impostor.id, genuine_devices_attestation);
         assert!(check.certs.lock().unwrap().get(impostor.id).is_none());
         assert!(matches!(
             check.status(impostor.id),
@@ -585,9 +607,57 @@ pub(crate) mod test {
 
         check.recv(
             device.id,
-            GenuineResponse::Attestation(Box::new(device.attestation_for(device.id))),
+            device.attestation_for(GenuineChallenge([0; 32]), device.id),
         );
         assert!(check.take_changes().is_empty());
         assert!(!has_staged_certs(&check));
+    }
+
+    #[test]
+    fn an_attestation_made_for_another_coordinators_challenge_is_rejected() {
+        let device = TestDevice::new(32);
+        let mut coordinator_a = new_check();
+        let mut coordinator_b = new_check();
+
+        let request_a = coordinator_a
+            .connected(device.id, "a", supported())
+            .unwrap();
+        let captured = device.answer(&request_a);
+
+        coordinator_b
+            .connected(device.id, "b", supported())
+            .unwrap();
+        coordinator_b.take_changes();
+        assert!(coordinator_b.recv(device.id, captured).is_none());
+        assert!(coordinator_b.certs.lock().unwrap().get(device.id).is_none());
+        assert!(coordinator_b.take_changes().is_empty());
+        assert!(!has_staged_certs(&coordinator_b));
+    }
+
+    #[test]
+    fn a_stored_attestation_only_reloads_with_the_challenge_it_was_made_for() -> anyhow::Result<()>
+    {
+        let device = TestDevice::new(33);
+        let temp_file = tempfile::NamedTempFile::new()?;
+        let mut conn = rusqlite::Connection::open(temp_file.path())?;
+        GenuineCerts::migrate(&mut conn)?;
+
+        let mut check = new_check();
+        prove(&mut check, &device, "a");
+        {
+            let mut certs = check.certs.lock().unwrap();
+            let update = certs.take_staged_update().unwrap();
+            certs.persist_update(&mut conn, update)?;
+        }
+        let reloaded = GenuineCerts::load(&mut conn, FACTORY.public_key())?;
+        assert!(reloaded.get(device.id).is_some());
+
+        conn.execute(
+            "UPDATE fs_genuine_attestations SET challenge = ?1",
+            rusqlite::params![[0u8; 32].as_slice()],
+        )?;
+        let reloaded = GenuineCerts::load(&mut conn, FACTORY.public_key())?;
+        assert!(reloaded.get(device.id).is_none());
+        Ok(())
     }
 }

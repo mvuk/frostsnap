@@ -555,14 +555,19 @@ impl<'a> DeviceLoop<'a> {
                     .ui
                     .set_workflow(ui::Workflow::prompt(ui::Prompt::EraseDevice)),
                 CoordinatorSendBody::_LegacyChallenge(_) => {}
-                CoordinatorSendBody::RequestGenuineAttestation => {
+                CoordinatorSendBody::RequestGenuineAttestation(challenge) => {
                     if let (Some(hw_rsa), Some(_)) =
                         (self.hardware_rsa.as_mut(), self.certificate.as_ref())
                     {
                         let message = frostsnap_comms::genuine_certificate::attestation_message(
+                            **challenge,
                             self.device_id,
                         );
-                        hw_rsa.push(SignRequest::GenuineAttestation, &message, self.sha256);
+                        hw_rsa.push(
+                            SignRequest::GenuineAttestation(**challenge),
+                            &message,
+                            self.sha256,
+                        );
                     }
                 }
                 CoordinatorSendBody::GenuineIdentityChallenge(challenge) => {
@@ -777,7 +782,7 @@ impl<'a> DeviceLoop<'a> {
             self.hardware_rsa.as_mut().and_then(|hw_rsa| hw_rsa.poll())
         {
             match request {
-                SignRequest::GenuineAttestation => {
+                SignRequest::GenuineAttestation(_) => {
                     if let Some(cert) = self.certificate.as_ref() {
                         self.upstream_connection.send_to_coordinator([
                             DeviceSendBody::GenuineAttestation {

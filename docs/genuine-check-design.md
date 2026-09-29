@@ -20,11 +20,14 @@ The DS hardware proves once that it vouches for a device id (the attestation bel
 device proves it is genuine in each session by signing with its id key. The DS key is **not**
 re-proven every session: holding the id key stands in for it.
 
-**Limit:** if an id key were extracted, the attacker would also need that device's attestation,
-which is a public blob. Anyone who has ever talked to the device can capture it, because PKCS#1 v1.5
-signatures are deterministic. With both, any hardware would pass as that device from then on. #522
-re-ran the DS key every session, so a clone also needed the DS peripheral. We accept this because
-of the assumption.
+**Limit:** the attestation covers a challenge chosen by the coordinator that asked for it. So a
+captured attestation is useless to any other coordinator, which makes the device prove the DS
+hardware live, once. An attacker who extracted an id key could still pass as that device to the
+coordinators that already verified the real one. Those coordinators already trust that key for
+signing, so faking the badge adds nothing. #522 re-ran the DS key every session, so a clone also
+needed the DS peripheral. We accept the difference because of the assumption, and because a DS
+attestation on every connection costs about 7× a Schnorr proof on a three-device chain, growing with
+chain length (measured on three dev frontier devices; see #522).
 
 Someone could claim a genuine device's id and relay our challenge to the real device. The check
 then proves the real device's key is present, and that key is exactly what signing trusts.
@@ -98,21 +101,22 @@ All new variants are **appended**, so no existing discriminant moves.
 
 Coordinator → device (`CoordinatorSendBody`, which is `EncapsV0`-encoded):
 
-- `RequestGenuineAttestation`: no payload.
+- `RequestGenuineAttestation(Box<GenuineChallenge>)`: 32 fresh random bytes. The coordinator has no
+  fixed identity key to use instead.
 - `GenuineIdentityChallenge(Box<GenuineChallenge>)`: 32 fresh random bytes per connection.
 
 Device → coordinator (`DeviceSendBody`):
 
 - `GenuineAttestation { certificate: Box<Certificate>, ds_signature: Box<[u8; 384]> }`. The DS key
-  signs `SHA256(ATTESTATION_TAG ‖ device_id)` with a new tag, `b"frostsnap-genuine-attest-v1"`.
-  This is a new message, not #522's bound proof: that RSA signature covers a challenge, so it
-  can't be persisted and re-checked later.
+  signs `SHA256(ATTESTATION_TAG ‖ challenge ‖ device_id)` with the tag
+  `b"frostsnap-genuine-attest-v2"`. The coordinator keeps the challenge with the signature, so it can
+  re-check it later, while the signature proves nothing to anyone else.
 - `GenuineIdentityProof { signature: Signature }`, from `sign_identity_challenge`: a Schnorr
   signature under the id key over the challenge, tagged `GENUINE_IDENTITY_MESSAGE_TAG`.
 
 The coordinator verifies against the connection's `from`, never against an id in the message body:
 
-- attestation: `verify_certificate_detailed`, then `verify_attestation(body, from, ds_signature)`;
+- attestation: `verify_attestation(certificate, factory_key, challenge, from, ds_signature)`;
 - identity proof: `verify_identity(from, challenge, signature)`.
 
 A certificate whose DS signature covers a different id fails.
@@ -153,11 +157,13 @@ as text). #522 never shipped, so nothing needs migrating. `GenuineCerts` is a ne
 `frostsnap_persist.rs` next to `DeviceNames`:
 
 ```sql
-CREATE TABLE fs_genuine_certs (id BLOB PRIMARY KEY, certificate BLOB NOT NULL, ds_signature BLOB NOT NULL)
+CREATE TABLE fs_genuine_attestations (id BLOB PRIMARY KEY, certificate BLOB NOT NULL,
+  ds_signature BLOB NOT NULL, challenge BLOB NOT NULL)
 ```
 
-- **What is stored.** A row holds the whole attestation, not facts taken from it, so the row stays
-  evidence. On load, each row is decoded and **re-verified** against this build's factory key: one
+- **What is stored.** A row holds the whole attestation, including the challenge this coordinator
+  sent, not facts taken from it, so the row stays evidence. On load, each row is decoded and
+  **re-verified** with its challenge against this build's factory key: one
   RSA verify per device, once per launch. A row that fails to decode or verify is skipped, and
   that device is back in state 1. This covers a dev build reading a prod database, or the reverse.
   A corrupt row can't stop the app starting. When the device next attests, `INSERT OR REPLACE`
@@ -211,5 +217,9 @@ enum GenuineStatus {
 - **DS signing is rare.** The device makes one DS signature per coordinator, the first time that
   coordinator sees it. After that, each session costs one Schnorr signature. #522 made a DS
   signature on every connection.
+- **DS signing doesn't block the device.** A DS signature takes about 730 ms. The device queues it
+  and polls the peripheral from its main loop (`device/src/ds.rs`), so it keeps serving USB, the UI
+  and daisy-chain forwarding meanwhile. The queue is bounded: at most one attestation computing and
+  one pending, and a newer challenge replaces the pending one.
 - **Frontier stack.** The frontier stack budget is tight (about 24.5% of 25%). The handlers box
   their 384-byte buffers, as #522 does, and `just stack-check` is part of done.

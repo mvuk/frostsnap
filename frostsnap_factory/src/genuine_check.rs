@@ -113,6 +113,7 @@ pub fn poll_genuine_check(
                         match genuine_certificate::verify_attestation(
                             &certificate,
                             genuine_key,
+                            *challenge,
                             msg.from,
                             &ds_signature,
                         ) {
@@ -222,8 +223,11 @@ fn queue_genuine_requests(
     challenge: GenuineChallenge,
 ) {
     port.queue_send(
-        CoordinatorSendMessage::to(device_id, CoordinatorSendBody::RequestGenuineAttestation)
-            .into(),
+        CoordinatorSendMessage::to(
+            device_id,
+            CoordinatorSendBody::RequestGenuineAttestation(Box::new(challenge)),
+        )
+        .into(),
     );
     port.queue_send(
         CoordinatorSendMessage::to(
@@ -236,6 +240,7 @@ fn queue_genuine_requests(
 
 fn wait_for_genuine_responses(
     port: &mut FramedSerialPort<Downstream>,
+    challenge: GenuineChallenge,
 ) -> Result<(Attestation, Signature), Box<dyn std::error::Error>> {
     let mut attestation = None;
     loop {
@@ -249,6 +254,7 @@ fn wait_for_genuine_responses(
                     attestation = Some(Attestation {
                         certificate: *certificate,
                         ds_signature,
+                        challenge,
                     });
                 }
                 Ok(DeviceSendBody::GenuineIdentityProof { signature }) => {
@@ -315,12 +321,13 @@ pub fn run_genuine_check(
     queue_genuine_requests(&mut port, device_id, challenge);
 
     println!("Waiting for genuine check responses...");
-    let (attestation, identity_signature) = wait_for_genuine_responses(&mut port)?;
+    let (attestation, identity_signature) = wait_for_genuine_responses(&mut port, challenge)?;
 
     let (env_name, factory_key) = find_factory_key(&attestation.certificate, known_keys)?;
     let certificate_body = genuine_certificate::verify_attestation(
         &attestation.certificate,
         factory_key,
+        challenge,
         device_id,
         &attestation.ds_signature,
     )?;

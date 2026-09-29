@@ -8,7 +8,7 @@ use nb::block;
 /// What a DS signature is for, so the device loop can build the reply once it completes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignRequest {
-    GenuineAttestation,
+    GenuineAttestation(frostsnap_comms::GenuineChallenge),
 }
 
 enum State {
@@ -61,13 +61,18 @@ impl<'a> HardwareDs<'a> {
 
     /// Queues a signature over `message`. The result comes out of [`Self::poll`].
     ///
-    /// A request already queued or being computed is dropped: the one result answers both, and it
-    /// keeps a coordinator repeating itself from growing the queue without bound.
+    /// Pending work stays bounded whatever the host sends: a request identical to the one computing
+    /// or one queued is dropped, and a new request replaces any queued request of the same kind.
+    /// The coordinator waits on only its newest request, so a replaced one would go unanswered
+    /// anyway.
     pub fn push(&mut self, request: SignRequest, message: &[u8], sha256: &mut Sha<'_>) {
         let in_flight = matches!(self.state, State::Computing(computing) if computing == request);
         if in_flight || self.queue.iter().any(|(queued, _)| *queued == request) {
             return;
         }
+        self.queue.retain(|(queued, _)| {
+            core::mem::discriminant(queued) != core::mem::discriminant(&request)
+        });
         let mut digest = [0u8; 32];
         let mut hasher = sha256.start::<esp_hal::sha::Sha256>();
         let mut remaining = message;

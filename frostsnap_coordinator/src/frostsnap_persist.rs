@@ -10,6 +10,7 @@ use bdk_chain::rusqlite_impl::migrate_schema;
 use frostsnap_comms::genuine_certificate::{
     verify_attestation, Certificate, CertificateBody, CERTIFICATE_BINCODE_CONFIG,
 };
+use frostsnap_comms::GenuineChallenge;
 use frostsnap_core::schnorr_fun::fun::{marker::EvenY, Point};
 use frostsnap_core::{
     coordinator::{self, restoration::RestorationMutation},
@@ -265,6 +266,8 @@ impl Persist<rusqlite::Connection> for DeviceNames {
 pub struct Attestation {
     pub certificate: Certificate,
     pub ds_signature: Box<[u8; 384]>,
+    /// The challenge this coordinator sent, which the DS signature covers.
+    pub challenge: GenuineChallenge,
 }
 
 /// Attestations that verified against this build's factory key, keyed by the device they vouch
@@ -306,13 +309,14 @@ impl Persist<rusqlite::Connection> for GenuineCerts {
     type LoadParams = Point<EvenY>;
 
     fn migrate(conn: &mut rusqlite::Connection) -> anyhow::Result<()> {
-        const SCHEMA_NAME: &str = "frostsnap_genuine_certs";
+        const SCHEMA_NAME: &str = "frostsnap_genuine_attestations";
         const MIGRATIONS: &[&str] = &[
             // Version 0
-            "CREATE TABLE IF NOT EXISTS fs_genuine_certs ( \
+            "CREATE TABLE IF NOT EXISTS fs_genuine_attestations ( \
                 id BLOB PRIMARY KEY, \
                 certificate BLOB NOT NULL, \
-                ds_signature BLOB NOT NULL \
+                ds_signature BLOB NOT NULL, \
+                challenge BLOB NOT NULL \
             )",
         ];
 
@@ -326,35 +330,40 @@ impl Persist<rusqlite::Connection> for GenuineCerts {
     /// from a build with another factory key, or corruption) is skipped: that device attests
     /// again and its row is replaced.
     fn load(conn: &mut rusqlite::Connection, factory_key: Point<EvenY>) -> anyhow::Result<Self> {
-        let mut stmt =
-            conn.prepare("SELECT id, certificate, ds_signature FROM fs_genuine_certs")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, certificate, ds_signature, challenge FROM fs_genuine_attestations",
+        )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, DeviceId>(0).ok(),
                 row.get::<_, Vec<u8>>(1).ok(),
                 row.get::<_, Vec<u8>>(2).ok(),
+                row.get::<_, Vec<u8>>(3).ok(),
             ))
         })?;
 
         let mut genuine_certs = GenuineCerts::default();
         for row in rows {
-            let (Some(device_id), Some(certificate), Some(ds_signature)) = row? else {
+            let (Some(device_id), Some(certificate), Some(ds_signature), Some(challenge)) = row?
+            else {
                 event!(
                     Level::WARN,
                     "skipping a malformed stored genuine attestation"
                 );
                 continue;
             };
-            let verified = decode_attestation(&certificate, ds_signature).and_then(|attestation| {
-                let body = verify_attestation(
-                    &attestation.certificate,
-                    factory_key,
-                    device_id,
-                    &attestation.ds_signature,
-                )
-                .ok()?;
-                Some((attestation, body))
-            });
+            let verified =
+                decode_attestation(&certificate, ds_signature, challenge).and_then(|attestation| {
+                    let body = verify_attestation(
+                        &attestation.certificate,
+                        factory_key,
+                        attestation.challenge,
+                        device_id,
+                        &attestation.ds_signature,
+                    )
+                    .ok()?;
+                    Some((attestation, body))
+                });
             match verified {
                 Some(entry) => {
                     genuine_certs.certs.insert(device_id, entry);
@@ -378,21 +387,31 @@ impl Persist<rusqlite::Connection> for GenuineCerts {
             let certificate =
                 bincode::encode_to_vec(&attestation.certificate, CERTIFICATE_BINCODE_CONFIG)?;
             conn.execute(
-                "INSERT OR REPLACE INTO fs_genuine_certs (id, certificate, ds_signature) \
-                 VALUES (?1, ?2, ?3)",
-                params![id, certificate, attestation.ds_signature.as_slice()],
+                "INSERT OR REPLACE INTO fs_genuine_attestations \
+                 (id, certificate, ds_signature, challenge) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    id,
+                    certificate,
+                    attestation.ds_signature.as_slice(),
+                    attestation.challenge.0.as_slice()
+                ],
             )?;
         }
         Ok(())
     }
 }
 
-fn decode_attestation(certificate: &[u8], ds_signature: Vec<u8>) -> Option<Attestation> {
+fn decode_attestation(
+    certificate: &[u8],
+    ds_signature: Vec<u8>,
+    challenge: Vec<u8>,
+) -> Option<Attestation> {
     let (certificate, _) =
         bincode::decode_from_slice(certificate, CERTIFICATE_BINCODE_CONFIG).ok()?;
     let ds_signature: Box<[u8; 384]> = ds_signature.into_boxed_slice().try_into().ok()?;
     Some(Attestation {
         certificate,
         ds_signature,
+        challenge: GenuineChallenge(challenge.try_into().ok()?),
     })
 }
