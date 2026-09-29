@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:frostsnap/certificate_details.dart';
 import 'package:frostsnap/device_colors.dart';
 import 'package:frostsnap/genuine_badge.dart';
 import 'package:frostsnap/id_ext.dart';
@@ -33,10 +34,26 @@ void main() {
   });
 
   group('GenuineStatus presentation', () {
+    final certificate = GenuineCertificate(
+      serial: 'FS-F-99999',
+      revision: '2.7-1625',
+      caseColor: CaseColor.blue,
+      provisionedAt: 1773801360,
+      dsPublicKey: Uint8List(0),
+    );
+
+    test('the provisioning time reads as a UTC date and time', () {
+      expect(formatProvisionedAt(1773801360), '18 Mar 2026, 02:36 UTC');
+      expect(formatProvisionedAt(0), '1 Jan 1970, 00:00 UTC');
+    });
+
     const scheme = ColorScheme.dark();
 
     test('each state maps to the look the design note gives it', () {
-      expect(const GenuineStatus.genuine().look, GenuineLook.genuine);
+      expect(
+        GenuineStatus.genuine(certificate: certificate).look,
+        GenuineLook.genuine,
+      );
       for (final supported in [true, false]) {
         final expected = supported
             ? GenuineLook.unverified
